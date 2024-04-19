@@ -1,6 +1,7 @@
 package io.github.zekerzhayard.forgewrapper.installer;
 
 import java.io.File;
+import java.lang.reflect.Method;
 import java.net.URL;
 import java.net.URLClassLoader;
 import java.nio.file.Files;
@@ -52,7 +53,8 @@ public class Main {
         }, ModuleUtil.getPlatformClassLoader())) {
             Class<?> installer = ucl.loadClass("io.github.zekerzhayard.forgewrapper.installer.Installer");
 
-            Map<String, Object> data = (Map<String, Object>) installer.getMethod("getData", File.class).invoke(null, detector.getLibraryDir().toFile());
+            Method m = installer.getMethod("getData", File.class);
+            Map<String, Object> data = (Map<String, Object>) m.invoke(null, detector.getLibraryDir().toFile());
             try {
                 Bootstrap.bootstrap((String[]) data.get("jvmArgs"), detector.getMinecraftJar(mcVersion).getFileName().toString(), detector.getLibraryDir().toAbsolutePath().toString());
             } catch (Throwable t) {

@@ -3,8 +3,6 @@ package io.github.zekerzhayard.forgewrapper.installer;
 import java.io.File;
 import java.io.InputStream;
 import java.io.InputStreamReader;
-import java.lang.reflect.Field;
-import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
@@ -13,29 +11,45 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
-import net.minecraftforge.installer.DownloadUtils;
-import net.minecraftforge.installer.actions.PostProcessors;
+import io.github.zekerzhayard.forgewrapper.installer.util.AbstractInstallWrapper;
+import io.github.zekerzhayard.forgewrapper.installer.util.InstallV0Wrapper;
+import io.github.zekerzhayard.forgewrapper.installer.util.InstallV1Wrapper;
 import net.minecraftforge.installer.actions.ProgressCallback;
-import net.minecraftforge.installer.json.Artifact;
 import net.minecraftforge.installer.json.Install;
 import net.minecraftforge.installer.json.InstallV1;
 import net.minecraftforge.installer.json.Util;
 import net.minecraftforge.installer.json.Version;
 
 public class Installer {
-    private static InstallV1Wrapper wrapper;
-    private static InstallV1Wrapper getWrapper(File librariesDir) {
+    private static AbstractInstallWrapper wrapper;
+    private static AbstractInstallWrapper getWrapper(File librariesDir) {
         if (wrapper == null) {
-            wrapper = new InstallV1Wrapper(Util.loadInstallProfile(), librariesDir);
+            try {
+                Class<?> installerClass = Util.class.getMethod("loadInstallProfile").getReturnType();
+                if (installerClass.equals(Install.class)) {
+                    wrapper = new InstallV0Wrapper(librariesDir);
+                } else if (installerClass.equals(InstallV1.class)) {
+                    wrapper = new InstallV1Wrapper(librariesDir);
+                } else {
+                    throw new IllegalArgumentException("Unable to determine the installer version. (" + installerClass + ")");
+                }
+            } catch (Throwable t) {
+                throw new RuntimeException(t);
+            }
         }
         return wrapper;
     }
 
     public static Map<String, Object> getData(File librariesDir) {
         Map<String, Object> data = new HashMap<>();
-        Version0 version = Version0.loadVersion(getWrapper(librariesDir));
+        getWrapper(librariesDir);
+        Version0 version = Version0.loadVersion(wrapper.loadInstallProfile());
         data.put("mainClass", version.getMainClass());
-        data.put("jvmArgs", version.getArguments().getJvm());
+        if (wrapper instanceof InstallV0Wrapper) {
+            data.put("jvmArgs", new String[0]);
+        } else {
+            data.put("jvmArgs", version.getArguments().getJvm());
+        }
         data.put("extraLibraries", getExtraLibraries(version));
         return data;
     }
@@ -52,14 +66,7 @@ public class Installer {
         monitor.message("java.net.preferIPv4Stack=" + System.getProperty("java.net.preferIPv4Stack"));
         monitor.message("Current Time: " + new SimpleDateFormat("dd/MM/yyyy HH:mm:ss").format(new Date()));
 
-        // MinecraftForge has removed all old installers since 2024/2/27, but they still exist in NeoForge.
-        PostProcessors processors = new PostProcessors(wrapper, true, monitor);
-        Method processMethod = PostProcessors.class.getMethod("process", File.class, File.class, File.class, File.class);
-        if (boolean.class.equals(processMethod.getReturnType())) {
-            return (boolean) processMethod.invoke(processors, libraryDir, minecraftJar, libraryDir.getParentFile(), installerJar);
-        } else {
-            return processMethod.invoke(processors, libraryDir, minecraftJar, libraryDir.getParentFile(), installerJar) != null;
-        }
+        return wrapper.runProcessor(monitor, libraryDir, minecraftJar, libraryDir.getParentFile(), installerJar);
     }
 
     // Some libraries in the version json are not available via direct download,
@@ -74,76 +81,6 @@ public class Installer {
             }
         }
         return paths;
-    }
-
-    public static class InstallV1Wrapper extends InstallV1 {
-        protected Map<String, List<Processor>> processors = new HashMap<>();
-        protected File librariesDir;
-
-        public InstallV1Wrapper(InstallV1 v1, File librariesDir) {
-            super(v1);
-            this.serverJarPath = v1.getServerJarPath();
-            this.librariesDir = librariesDir;
-        }
-
-        @Override
-        public List<Processor> getProcessors(String side) {
-            List<Processor> processor = this.processors.get(side);
-            if (processor == null) {
-                checkProcessorFiles(processor = super.getProcessors(side), super.getData("client".equals(side)), this.librariesDir);
-                this.processors.put(side, processor);
-            }
-            return processor;
-        }
-
-        private static void checkProcessorFiles(List<Processor> processors, Map<String, String> data, File base) {
-            Map<String, File> artifactData = new HashMap<>();
-            for (Map.Entry<String, String> entry : data.entrySet()) {
-                String value = entry.getValue();
-                if (value.charAt(0) == '[' && value.charAt(value.length() - 1) == ']') {
-                    artifactData.put("{" + entry.getKey() + "}", Artifact.from(value.substring(1, value.length() - 1)).getLocalPath(base));
-                }
-            }
-
-            Map<Processor, Map<String, String>> outputsMap = new HashMap<>();
-            label:
-            for (Processor processor : processors) {
-                Map<String, String> outputs = new HashMap<>();
-                if (processor.getOutputs().isEmpty()) {
-                    String[] args = processor.getArgs();
-                    for (int i = 0; i < args.length; i++) {
-                        for (Map.Entry<String, File> entry : artifactData.entrySet()) {
-                            if (args[i].contains(entry.getKey())) {
-                                // We assume that all files that exist but don't have the sha1 checksum are valid.
-                                if (entry.getValue().exists()) {
-                                    outputs.put(entry.getKey(), DownloadUtils.getSha1(entry.getValue()));
-                                } else {
-                                    outputsMap.clear();
-                                    break label;
-                                }
-                            }
-                        }
-                    }
-                    outputsMap.put(processor, outputs);
-                }
-            }
-            for (Map.Entry<Processor, Map<String, String>> entry : outputsMap.entrySet()) {
-                setOutputs(entry.getKey(), entry.getValue());
-            }
-        }
-
-        private static Field outputsField;
-        private static void setOutputs(Processor processor, Map<String, String> outputs) {
-            try {
-                if (outputsField == null) {
-                    outputsField = Processor.class.getDeclaredField("outputs");
-                    outputsField.setAccessible(true);
-                }
-                outputsField.set(processor, outputs);
-            } catch (Throwable t) {
-                throw new RuntimeException(t);
-            }
-        }
     }
 
     public static class Version0 extends Version {
